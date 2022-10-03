@@ -203,7 +203,7 @@ static void task_motor(void *pvParameters) {
 
 void aciona_motor(entrada_motor in_n) {
 	pio_set(in_n.p_pio, in_n.ul_mask);
-	RTT_init(1000, 50, RTT_MR_ALMIEN);
+	RTT_init(1000, 5, RTT_MR_ALMIEN);
 }
 
 void desaciona_motor(entrada_motor in_n) {
