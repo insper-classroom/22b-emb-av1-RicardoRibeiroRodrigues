@@ -53,6 +53,14 @@
 #define IN4_IDX 2
 #define IN4_IDX_MASK (1u << IN4_IDX)
 
+#define WIDTH_OLED 128
+#define HEIGHT_OLED 32
+
+typedef struct {
+	Pio *p_pio; 
+	const uint32_t ul_mask;
+} entrada_motor;
+
 
 /** RTOS  */
 #define TASK_MODO_STACK_SIZE                (1024*6/sizeof(portSTACK_TYPE))
@@ -74,7 +82,11 @@ xSemaphoreHandle xSemaphoreRTT;
 
 /** prototypes */
 void but_callback(void);
+static void RTT_init(float freqPrescale, uint32_t IrqNPulses, uint32_t rttIRQSource);
 static void io_init(void);
+void desaciona_motor(entrada_motor in_n);
+void aciona_motor(entrada_motor in_n);
+void gfx_clear(void);
 
 /************************************************************************/
 /* RTOS application funcs                                               */
@@ -116,14 +128,23 @@ void but_3_callback(void){
 	xQueueSendFromISR(xQueueModo, &angulo, 0);
 }
 
+void RTT_Handler(void) {
+	uint32_t ul_status;
+	ul_status = rtt_get_status(RTT);
+
+	/* IRQ due to Alarm */
+	if ((ul_status & RTT_SR_ALMS) == RTT_SR_ALMS) {
+		xSemaphoreGiveFromISR(xSemaphoreRTT, 0);
+	}
+}
+
 /************************************************************************/
 /* TASKS                                                                */
 /************************************************************************/
 
 static void task_modo(void *pvParameters) {
 	gfx_mono_ssd1306_init();
-	gfx_mono_draw_string("Exemplo RTOS", 0, 0, &sysfont);
-	gfx_mono_draw_string("oii", 0, 20, &sysfont);
+	
 	char angulo;
 
 	for (;;)  {
@@ -131,21 +152,102 @@ static void task_modo(void *pvParameters) {
 			int n_passos = (int)((float) angulo / 0.17578125);
 			printf("Recebeu um angulo!: %d\n", angulo);
 			printf("Numero de passos: %d\n", n_passos);
+			gfx_clear();
+			char str[99];
+			sprintf(str, "Angulo = %d", angulo);
+			gfx_mono_draw_string(str, 0, 0, &sysfont);
 			xQueueSend(xQueueSteps, &n_passos, 0);
 		}
 	}
 }
 
 static void task_motor(void *pvParameters) {
+	int n_passos;
+	int contador_passo = 0;
+	int i;
+	
+	entrada_motor in_1 = {IN1_PIO, IN1_IDX_MASK};
+	entrada_motor in_2 = {IN2_PIO, IN2_IDX_MASK};
+	entrada_motor in_3 = {IN3_PIO, IN3_IDX_MASK};
+	entrada_motor in_4 = {IN4_PIO, IN4_IDX_MASK};
+	entrada_motor vetor_entradas[] = {in_1, in_2, in_3, in_4};
+	
 	
 	for(;;) {
-		if()
+		if(xQueueReceive(xQueueSteps, &n_passos, 0)) {
+			printf("Recebeu o numero de passos! %d\n", n_passos);
+			i = 1;
+			contador_passo = 0;
+			aciona_motor(vetor_entradas[contador_passo]);
+		}
+		
+		if ((xSemaphoreTake(xSemaphoreRTT, 0) == pdPASS) && (i <= n_passos)) {
+			printf("Chegou aqui, i = %d, passo = %d\n", i, contador_passo);
+			desaciona_motor(vetor_entradas[contador_passo]);
+			contador_passo++;
+			if (contador_passo > 3) {
+				contador_passo = 0;
+			}
+			i++;
+			aciona_motor(vetor_entradas[contador_passo]);
+		}
+		if (i > n_passos) {
+			desaciona_motor(vetor_entradas[contador_passo]);
+		}
 	}
 }
 
 /************************************************************************/
 /* funcoes                                                              */
 /************************************************************************/
+
+void aciona_motor(entrada_motor in_n) {
+	pio_set(in_n.p_pio, in_n.ul_mask);
+	RTT_init(1000, 50, RTT_MR_ALMIEN);
+}
+
+void desaciona_motor(entrada_motor in_n) {
+	pio_clear(in_n.p_pio, in_n.ul_mask);
+}
+
+/** 
+ * Configura RTT
+ *
+ * arg0 pllPreScale  : Frequência na qual o contador irá incrementar
+ * arg1 IrqNPulses   : Valor do alarme 
+ * arg2 rttIRQSource : Pode ser uma 
+ *     - 0: 
+ *     - RTT_MR_RTTINCIEN: Interrupção por incremento (pllPreScale)
+ *     - RTT_MR_ALMIEN : Interrupção por alarme
+ */
+static void RTT_init(float freqPrescale, uint32_t IrqNPulses, uint32_t rttIRQSource) {
+
+  uint16_t pllPreScale = (int) (((float) 32768) / freqPrescale);
+	
+  rtt_sel_source(RTT, false);
+  rtt_init(RTT, pllPreScale);
+  
+  if (rttIRQSource & RTT_MR_ALMIEN) {
+	uint32_t ul_previous_time;
+  	ul_previous_time = rtt_read_timer_value(RTT);
+  	while (ul_previous_time == rtt_read_timer_value(RTT));
+  	rtt_write_alarm_time(RTT, IrqNPulses+ul_previous_time);
+  }
+
+  /* config NVIC */
+  NVIC_DisableIRQ(RTT_IRQn);
+  NVIC_ClearPendingIRQ(RTT_IRQn);
+  NVIC_SetPriority(RTT_IRQn, 4);
+  NVIC_EnableIRQ(RTT_IRQn);
+
+  /* Enable RTT interrupt */
+  if (rttIRQSource & (RTT_MR_RTTINCIEN | RTT_MR_ALMIEN))
+	rtt_enable_interrupt(RTT, rttIRQSource);
+  else
+	rtt_disable_interrupt(RTT, RTT_MR_RTTINCIEN | RTT_MR_ALMIEN);
+		  
+}
+
 
 static void configure_console(void) {
 	const usart_serial_options_t uart_serial_options = {
@@ -247,6 +349,15 @@ static void io_init(void) {
 	pmc_enable_periph_clk(IN4_PIO_ID);
 	pio_set_output(IN4_PIO, IN4_IDX_MASK, 0, 0, 0);
 }
+
+void gfx_clear(void) {
+	for (int x = 0; x < WIDTH_OLED; x++) {
+		for (int y = 0; y < HEIGHT_OLED; y++) {
+			gfx_mono_draw_pixel(x, y, GFX_PIXEL_CLR);
+		}
+	}
+}
+
 
 /************************************************************************/
 /* main                                                                 */
